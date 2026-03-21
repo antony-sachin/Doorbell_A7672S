@@ -3,7 +3,9 @@
 #include "hardware.h"
 #include "sdcard.h"
 
-// --- Forward declarations ---
+// ---------------------------------------------------------------------------
+// Forward declarations
+// ---------------------------------------------------------------------------
 void readModem();
 void processLine(char* line);
 void readKeypad();
@@ -12,7 +14,9 @@ void startDialing();
 void nextCall();
 void resetSystem();
 
-// --- Password (kept as String for single-assignment compatibility) ---
+// ---------------------------------------------------------------------------
+// Password — loaded from SD at startup via sd_loadPassword()
+// ---------------------------------------------------------------------------
 String DTMF_PASSWORD = "108";
 
 int getTotalCalls() {
@@ -23,36 +27,46 @@ const char* getPhoneNumber(int index) {
   return sdListLoaded ? dynamicCallList[index] : "";
 }
 
-// --- State machine ---
+// ---------------------------------------------------------------------------
+// State machine
+// ---------------------------------------------------------------------------
 enum SystemState { ST_IDLE, ST_IN_CALL };
 SystemState state = ST_IDLE;
 
-// --- Fixed buffers — no heap String objects ---
-char    inputString[8]   = "";   // Floor/apt digits from keypad
-char    modemBuffer[128] = "";   // One line from modem UART
+// ---------------------------------------------------------------------------
+// Buffers — no heap String objects
+// ---------------------------------------------------------------------------
+char    inputString[8]   = "";    // floor/apt digits typed on keypad
+char    modemBuffer[128] = "";    // one line accumulated from modem UART
 uint8_t modemLen         = 0;
-char    dtmfBuffer[16]   = "";   // DTMF digits accumulated during a call
+char    dtmfBuffer[16]   = "";    // DTMF digits received during active call
 
 int           currentCallIndex = 0;
 unsigned long stateTimer       = 0;
 
-// --- Call answered flag ---
-// Set true when +CLCC reports status 0 (call active = resident picked up).
-// Cleared at the start of every new call in startDialing() and resetSystem().
+// ---------------------------------------------------------------------------
+// callWasAnswered flag
+//   true  — resident picked up (+CLCC status 0 seen)
+//   false — rang out or declined mid-ring
 //
-// Decision on NO CARRIER:
-//   callWasAnswered = false → not answered OR declined mid-ring → nextCall()
-//   callWasAnswered = true  → answered then hung up without password → resetSystem()
-//
+// On NO CARRIER:
+//   false → nextCall()    (try next resident)
+//   true  → resetSystem() (resident hung up without correct password)
+// ---------------------------------------------------------------------------
 bool callWasAnswered = false;
 
 // ---------------------------------------------------------------------------
+// logic_init
+// ---------------------------------------------------------------------------
 void logic_init() {
   delay(1000);
-  hw_notify(F("System Ready"), F("ready.amr"));
+  hw_notify(F("System Ready"), F("ready.amr"));  // TTS waits to finish
   Serial.println(F("[SYSTEM]: IDLE - Waiting for Floor/Apt Number"));
 }
 
+// ---------------------------------------------------------------------------
+// logic_loop
+// ---------------------------------------------------------------------------
 void logic_loop() {
   readModem();
   readKeypad();
@@ -60,8 +74,7 @@ void logic_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// readModem — accumulates UART chars into a fixed buffer, calls processLine
-//             on each newline. Overflow-safe: extra chars are dropped.
+// readModem — accumulates modem UART into a line buffer, calls processLine
 // ---------------------------------------------------------------------------
 void readModem() {
   while (ss.available()) {
@@ -80,13 +93,13 @@ void readModem() {
 }
 
 // ---------------------------------------------------------------------------
-// processLine — all decisions made here, zero heap allocation.
+// processLine — react to modem URCs
 // ---------------------------------------------------------------------------
 void processLine(char* line) {
-  // Trim leading spaces
+  // trim leading spaces
   while (*line == ' ') line++;
 
-  // Trim trailing spaces
+  // trim trailing spaces
   int len = (int)strlen(line);
   while (len > 0 && line[len - 1] == ' ') line[--len] = '\0';
 
@@ -94,21 +107,22 @@ void processLine(char* line) {
 
   Serial.print(F("[MODEM]: ")); Serial.println(line);
 
-  // --- +CLCC: watch for status 0 (call active = answered) ---
-  // Format: +CLCC: <idx>,<dir>,<status>,<mode>,<mpty>,...
-  // status 0 = active (answered)
-  // status 2 = dialing
-  // status 3 = alerting/ringing on remote end
-  // status 6 = disconnected
+  // -------------------------------------------------------------------------
+  // +CLCC — track call status
+  //   status field (3rd comma-field):
+  //     0 = active/answered
+  //     2 = MO dialing
+  //     3 = remote alerting/ringing
+  //     6 = disconnected
+  // -------------------------------------------------------------------------
   if (strncmp(line, "+CLCC:", 6) == 0) {
-    // Walk to the 3rd comma-separated field (status)
     char* p = line + 6;
     int commas = 0;
     while (*p != '\0' && commas < 2) {
       if (*p == ',') commas++;
       p++;
     }
-    while (*p == ' ') p++;  // skip any spaces before the digit
+    while (*p == ' ') p++;
 
     if (*p == '0') {
       callWasAnswered = true;
@@ -116,21 +130,17 @@ void processLine(char* line) {
     }
   }
 
-  // --- NO CARRIER ---
+  // -------------------------------------------------------------------------
+  // NO CARRIER — call ended by network or remote party
   //
-  //  callWasAnswered = false:
-  //    Covers BOTH "rang out with no answer" AND "declined mid-ring".
-  //    In both cases the resident did not engage → call next person.
-  //
-  //  callWasAnswered = true:
-  //    Resident picked up but hung up without entering the correct password.
-  //    No point calling next person → reset and wait for a new visitor.
-  //
+  //   callWasAnswered = false → not answered / declined mid-ring → nextCall()
+  //   callWasAnswered = true  → answered, hung up without password → resetSystem()
+  // -------------------------------------------------------------------------
   if (strstr(line, "NO CARRIER") != NULL) {
     if (state == ST_IN_CALL) {
       if (!callWasAnswered) {
+        // TTS finishes before nextCall because hw_notify blocks on +CTTS: 0
         hw_notify(F("No Answer. Calling Next."), F("nextuser.amr"));
-        delay(2000);
         nextCall();
       } else {
         hw_notify(F("Call Ended. System Reset."), F("invalid.amr"));
@@ -139,13 +149,15 @@ void processLine(char* line) {
     }
   }
 
-  // --- DTMF handling ---
-  // Modem format:  +DTMF: 1   (space between ':' and digit)
+  // -------------------------------------------------------------------------
+  // DTMF — accumulate digits, check for password match
+  // Modem sends:  +RXDTMF: 1   (space between ':' and digit)
+  // -------------------------------------------------------------------------
   if (strstr(line, "DTMF:") != NULL) {
     char* lastColon = strrchr(line, ':');
     if (lastColon != NULL) {
       char* digitPtr = lastColon + 1;
-      while (*digitPtr == ' ') digitPtr++;  // skip space after ':'
+      while (*digitPtr == ' ') digitPtr++;   // skip space after ':'
       char digit = *digitPtr;
 
       if (digit != '\0') {
@@ -156,13 +168,20 @@ void processLine(char* line) {
         }
         Serial.print(F(" [DTMF]: ")); Serial.println(digit);
 
-        // Check if dtmfBuffer ends with DTMF_PASSWORD
+        // check if dtmfBuffer ends with DTMF_PASSWORD
         uint8_t pwdLen = (uint8_t)DTMF_PASSWORD.length();
         uint8_t bufLen = (uint8_t)strlen(dtmfBuffer);
         if (bufLen >= pwdLen &&
             strcmp(dtmfBuffer + bufLen - pwdLen, DTMF_PASSWORD.c_str()) == 0) {
-          hw_unlockDoor();
+
+          // 1. Cut call FIRST — modem must be idle before any other command
           hw_sendCmd(F("ATH"));
+          hw_waitForOK(5000);        // confirmed call cut
+
+          // 2. Open door — TTS plays then relay fires (hw_notify blocks)
+          hw_unlockDoor();
+
+          // 3. Back to idle
           resetSystem();
         }
       }
@@ -171,7 +190,7 @@ void processLine(char* line) {
 }
 
 // ---------------------------------------------------------------------------
-// readKeypad — builds inputString in a fixed char buffer.
+// readKeypad — collect floor/apt digits, trigger dialing on 'D'
 // ---------------------------------------------------------------------------
 void readKeypad() {
   char key = customKeypad.getKey();
@@ -188,10 +207,8 @@ void readKeypad() {
   else if (key == 'D' && state == ST_IDLE) {
     if (strlen(inputString) > 0) {
       int floorNum = atoi(inputString);
-
       if (floorNum > 0) {
         Serial.print(F("[SYSTEM]: Fetching numbers for Floor: ")); Serial.println(floorNum);
-
         if (sd_loadCallList("/CALLERS/USERS.TXT", floorNum)) {
           currentCallIndex = 0;
           startDialing();
@@ -208,39 +225,55 @@ void readKeypad() {
 }
 
 // ---------------------------------------------------------------------------
-// runStateLogic — safety timeout in case NO CARRIER never arrives.
+// runStateLogic — 90-second safety timeout
+//   If NO CARRIER never arrives (modem stuck), force-hang and try next person.
 // ---------------------------------------------------------------------------
 void runStateLogic() {
   if (state == ST_IN_CALL && (millis() - stateTimer > CALL_DURATION_LIMIT)) {
+
+    // 1. Cut call — wait for modem confirmation
+    hw_sendCmd(F("ATH"));
+    hw_waitForOK(5000);
+
+    // 2. Notify — TTS blocks until done
     hw_notify(F("Timeout. Calling Next."), F("nextuser.amr"));
-    nextCall();
+
+    // 3. Advance to next person
+    currentCallIndex++;
+    if (currentCallIndex < getTotalCalls()) {
+      startDialing();
+    } else {
+      hw_notify(F("No one answered. System Reset."), F("invalid.amr"));
+      resetSystem();
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
-// startDialing
+// startDialing — announce, safety-ATH, then dial next number
 // ---------------------------------------------------------------------------
 void startDialing() {
-  // Dynamic TTS — built inline, no heap String concat
+  // Announce which person we are calling (dynamic TTS, no String concat)
   ss.print(F("AT+CTTS=2,\"Calling Person "));
   ss.print(currentCallIndex + 1);
   ss.println(F("\""));
   Serial.print(F("[NOTIFY]: Calling Person ")); Serial.println(currentCallIndex + 1);
+  hw_waitForTTS(10000);   // wait for TTS to finish before sending next command
 
-  delay(2000);
+  // Safety ATH — clears any ghost call state before dialing
   hw_sendCmd(F("ATH"));
-  delay(1000);
+  hw_waitForOK(3000);
 
-  // Flush modem receive buffer before dialling
+  // Flush residual modem bytes
   while (ss.available()) { ss.read(); }
 
+  // Dial
+  Serial.print(F("[CMD]: ATD")); Serial.print(getPhoneNumber(currentCallIndex)); Serial.println(F(";"));
   ss.print(F("ATD"));
   ss.print(getPhoneNumber(currentCallIndex));
   ss.println(F(";"));
 
-  // ATD...;  → modem ACKs with OK (command accepted, NOT call answered).
-  // No further modem event arrives when the remote picks up on voice calls.
-  // We go straight to ST_IN_CALL; NO CARRIER signals the end of the call.
+  // Enter call state
   state           = ST_IN_CALL;
   stateTimer      = millis();
   callWasAnswered = false;
@@ -249,13 +282,12 @@ void startDialing() {
 }
 
 // ---------------------------------------------------------------------------
-// nextCall
+// nextCall — called only after NO CARRIER (call already ended by network)
+//            No ATH needed — the line is already dead.
 // ---------------------------------------------------------------------------
 void nextCall() {
-  hw_sendCmd(F("ATH"));
-  delay(2000);
+  delay(500);
   currentCallIndex++;
-
   if (currentCallIndex < getTotalCalls()) {
     startDialing();
   } else {
@@ -265,7 +297,7 @@ void nextCall() {
 }
 
 // ---------------------------------------------------------------------------
-// resetSystem
+// resetSystem — return to idle, clear all state
 // ---------------------------------------------------------------------------
 void resetSystem() {
   state            = ST_IDLE;
@@ -274,5 +306,6 @@ void resetSystem() {
   callWasAnswered  = false;
   sdListLoaded     = false;
   dynamicCallCount = 0;
+  currentCallIndex = 0;
   Serial.println(F("[SYSTEM]: IDLE - Waiting for Floor/Apt Number"));
 }
