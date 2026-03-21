@@ -3,9 +3,9 @@
 #include <SPI.h>
 #include <SD.h>
 
-char dynamicCallList[MAX_CALLERS][16]; 
-int dynamicCallCount = 0;
-bool sdListLoaded = false;
+char dynamicCallList[MAX_CALLERS][16];
+int  dynamicCallCount = 0;
+bool sdListLoaded     = false;
 
 void sd_init(uint8_t csPin) {
   Serial.print(F("[SD]: Initializing SD card..."));
@@ -22,59 +22,78 @@ bool sd_loadCallList(const char* filepath, int floorNum) {
     Serial.print(F("[SD]: File not found: ")); Serial.println(filepath);
     return false;
   }
-  
+
   File file = SD.open(filepath);
   if (!file) return false;
 
   dynamicCallCount = 0;
-  sdListLoaded = false;
-  
-  String targetPrefix = String(floorNum) + ":"; 
+  sdListLoaded     = false;
+
+  // Build the floor prefix (e.g. "3:") into a fixed stack buffer — no heap
+  char targetPrefix[8];
+  snprintf(targetPrefix, sizeof(targetPrefix), "%d:", floorNum);
+  uint8_t prefixLen = (uint8_t)strlen(targetPrefix);
+
   bool foundFloor = false;
 
-  while (file.available() && !foundFloor) {
-    String line = file.readStringUntil('\n'); 
-    line.trim(); 
-    
-    if (line.startsWith(targetPrefix)) {
-      foundFloor = true;
-      Serial.print(F("[SD]: Found Floor ")); Serial.println(floorNum);
-      
-      int colonIdx = line.indexOf(':');
-      int semiIdx = line.indexOf(';');
-      
-      String numbersPart = "";
-      if (semiIdx != -1) {
-        numbersPart = line.substring(colonIdx + 1, semiIdx);
-      } else {
-        numbersPart = line.substring(colonIdx + 1);
-      }
-      numbersPart.trim();
+  // Fixed line buffer — 96 chars covers any realistic USERS.TXT line
+  char lineBuf[96];
 
-      int startIdx = 0;
-      while (startIdx < numbersPart.length() && dynamicCallCount < MAX_CALLERS) {
-        int commaIdx = numbersPart.indexOf(',', startIdx);
-        String phoneNum;
-        
-        if (commaIdx == -1) {
-          phoneNum = numbersPart.substring(startIdx);
-          startIdx = numbersPart.length(); 
-        } else {
-          phoneNum = numbersPart.substring(startIdx, commaIdx); 
-          startIdx = commaIdx + 1; 
-        }
-        
-        phoneNum.trim();
-        
-        if (phoneNum.length() > 5 && phoneNum.length() < 16) { 
-          phoneNum.toCharArray(dynamicCallList[dynamicCallCount], 16);
-          Serial.print(F(" -> Loaded Number: ")); Serial.println(dynamicCallList[dynamicCallCount]);
-          dynamicCallCount++;
-        }
+  while (file.available() && !foundFloor) {
+
+    // Read one line manually into fixed buffer — no String heap allocation
+    uint8_t i = 0;
+    while (file.available() && i < (uint8_t)(sizeof(lineBuf) - 1)) {
+      char c = (char)file.read();
+      if (c == '\n') break;
+      if (c != '\r') lineBuf[i++] = c;
+    }
+    lineBuf[i] = '\0';
+
+    // Trim trailing spaces
+    while (i > 0 && lineBuf[i - 1] == ' ') lineBuf[--i] = '\0';
+
+    // Check if this line starts with our floor prefix
+    if (strncmp(lineBuf, targetPrefix, prefixLen) != 0) continue;
+
+    foundFloor = true;
+    Serial.print(F("[SD]: Found Floor ")); Serial.println(floorNum);
+
+    // Find the colon and start parsing numbers after it
+    char* colonPtr = strchr(lineBuf, ':');
+    if (!colonPtr) break;
+    char* numbersStart = colonPtr + 1;
+
+    // Strip everything after ';' (optional comment / label section)
+    char* semiPtr = strchr(numbersStart, ';');
+    if (semiPtr) *semiPtr = '\0';
+
+    // Trim leading spaces on the numbers section
+    while (*numbersStart == ' ') numbersStart++;
+
+    // Tokenise by comma — strtok operates in-place, zero heap use
+    char* token = strtok(numbersStart, ",");
+    while (token != NULL && dynamicCallCount < MAX_CALLERS) {
+
+      // Trim leading spaces on this token
+      while (*token == ' ') token++;
+
+      // Trim trailing spaces on this token
+      char* end = token + strlen(token) - 1;
+      while (end > token && *end == ' ') *end-- = '\0';
+
+      uint8_t len = (uint8_t)strlen(token);
+      if (len > 5 && len < 16) {
+        strncpy(dynamicCallList[dynamicCallCount], token, 15);
+        dynamicCallList[dynamicCallCount][15] = '\0'; // Guarantee null-termination
+        Serial.print(F(" -> Loaded Number: "));
+        Serial.println(dynamicCallList[dynamicCallCount]);
+        dynamicCallCount++;
       }
+      token = strtok(NULL, ",");
     }
   }
-  
+
   file.close();
   sdListLoaded = (dynamicCallCount > 0);
   return sdListLoaded;
@@ -85,12 +104,24 @@ void sd_loadPassword(const char* filepath) {
     Serial.println(F("[SD]: keys.TXT not found. Using default code."));
     return;
   }
+
   File file = SD.open(filepath);
   if (file) {
-    String p = file.readString();
-    p.trim();
-    if (p.length() > 0) {
-      DTMF_PASSWORD = p; 
+    // Fixed buffer — passwords should never exceed 15 chars
+    char buf[16];
+    uint8_t i = 0;
+    while (file.available() && i < (uint8_t)(sizeof(buf) - 1)) {
+      char c = (char)file.read();
+      if (c == '\n' || c == '\r') break;
+      buf[i++] = c;
+    }
+    buf[i] = '\0';
+
+    // Trim trailing spaces
+    while (i > 0 && buf[i - 1] == ' ') buf[--i] = '\0';
+
+    if (i > 0) {
+      DTMF_PASSWORD = buf; // Single assignment — minimal heap touch
       Serial.print(F("[SD]: Password Updated to: ")); Serial.println(DTMF_PASSWORD);
     }
     file.close();

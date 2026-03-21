@@ -15,22 +15,29 @@ Keypad customKeypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS)
 
 void hw_init() {
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH); 
+  digitalWrite(RELAY_PIN, HIGH);
   ss.begin(9600);
-  
-  hw_sendCmd("AT"); 
-  hw_sendCmd("ATE1"); 
-  hw_sendCmd("AT+CLIP=1");  
-  hw_sendCmd("AT+DDET=1"); 
-  hw_sendCmd("AT+CNMI=0,0,0,0,0");
-  hw_sendCmd("AT+CSDVC=1");    
+
+  hw_sendCmd(F("AT"));
+  hw_sendCmd(F("ATE1"));
+  hw_sendCmd(F("AT+CLIP=1"));
+  hw_sendCmd(F("AT+DDET=1"));
+  hw_sendCmd(F("AT+CNMI=0,0,0,0,0"));
+  hw_sendCmd(F("AT+CSDVC=1"));
 }
 
-void hw_sendCmd(String cmd) {
+// Overload 1: Flash string (F() macro) — no heap copy
+void hw_sendCmd(const __FlashStringHelper* cmd) {
   ss.println(cmd);
 }
 
-void hw_notify(String text, String filename) {
+// Overload 2: char* — used when runtime string is needed (e.g. ATD number)
+void hw_sendCmd(const char* cmd) {
+  ss.println(cmd);
+}
+
+// Both text and filename come from flash (F() macro) — zero heap allocation
+void hw_notify(const __FlashStringHelper* text, const __FlashStringHelper* filename) {
   // LOGGING: Keep serial logs exactly as before
   Serial.print(F("[NOTIFY]: ")); Serial.println(text);
 
@@ -43,13 +50,13 @@ void hw_notify(String text, String filename) {
   /*
   ss.print(F("AT+CPAMR=\"c:/"));
   ss.print(filename);
-  ss.println(F("\",1")); 
+  ss.println(F("\",1"));
   */
 }
 
 void hw_unlockDoor() {
   hw_notify(F("Door Unlocked"), F("welcome.amr"));
-  digitalWrite(RELAY_PIN, LOW); 
-  delay(3000);                  
+  digitalWrite(RELAY_PIN, LOW);
+  delay(3000);
   digitalWrite(RELAY_PIN, HIGH);
 }
