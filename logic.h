@@ -3,3 +3,5 @@
 
 void logic_init();
 void logic_loop();
+int getTotalCalls();
+const char* getPhoneNumber(int index);

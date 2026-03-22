@@ -131,11 +131,67 @@ void processLine(char* line) {
   }
 
   // -------------------------------------------------------------------------
-  // NO CARRIER — call ended by network or remote party
+  // RING — incoming call
+  // Wait for +CLIP to get caller number then check SD card.
+  // Registered number → accept (do nothing, let it ring through)
+  // Unknown number    → reject with ATH immediately
   //
-  //   callWasAnswered = false → not answered / declined mid-ring → nextCall()
-  //   callWasAnswered = true  → answered, hung up without password → resetSystem()
+  // Note: RING handling only when ST_IDLE.
+  // ST_IN_CALL means we have an active outgoing call — RING impossible.
   // -------------------------------------------------------------------------
+  if (strcmp(line, "RING") == 0) {
+    if (state == ST_IDLE) {
+      Serial.println(F("[SYSTEM]: Incoming call detected — waiting for caller ID"));
+      // ATH will be sent from +CLIP handler if number not registered
+      // If +CLIP never arrives — RING repeats and we check again next time
+    }
+  }
+
+  // +CLIP — caller ID arrives after RING
+  // Format: +CLIP: "+919876543210",145,"",,"",0
+  if (strncmp(line, "+CLIP:", 6) == 0) {
+    if (state == ST_IDLE) {
+
+      // Extract number between first pair of quotes
+      char callerNum[16] = "";
+      char* start = strchr(line, '"');
+      if (start != NULL) {
+        start++;                           // skip opening quote
+        char* end = strchr(start, '"');    // find closing quote
+        if (end != NULL) {
+          uint8_t len = (uint8_t)(end - start);
+          if (len > 0 && len < 16) {
+            strncpy(callerNum, start, len);
+            callerNum[len] = '\0';
+          }
+        }
+      }
+
+      Serial.print(F("[SYSTEM]: Incoming caller: ")); Serial.println(callerNum);
+
+      // Search entire USERS.TXT for this number
+      if (strlen(callerNum) > 0 &&
+          sd_isNumberRegistered("/CALLERS/USERS.TXT", callerNum)) {
+        // Registered resident — answer the call so they can enter DTMF password
+        Serial.println(F("[SYSTEM]: Registered number — answering"));
+        hw_sendCmd(F("ATA"));
+        hw_waitForOK(5000);
+        state           = ST_IN_CALL;
+        stateTimer      = millis();   // start 90s safety timeout
+        callWasAnswered = true;       // resident answered — hang up → resetSystem()
+        dtmfBuffer[0]   = '\0';
+        Serial.println(F("[SYSTEM]: Incoming call answered -> ST_IN_CALL"));
+      } else {
+        // Unknown number — reject immediately
+        Serial.println(F("[SYSTEM]: Unknown number — rejecting call"));
+        hw_sendCmd(F("ATH"));
+        hw_waitForOK(3000);
+        Serial.println(F("[SYSTEM]: Incoming call rejected"));
+      }
+    }
+  }
+
+
   if (strstr(line, "NO CARRIER") != NULL) {
     if (state == ST_IN_CALL) {
       if (!callWasAnswered) {
@@ -152,8 +208,9 @@ void processLine(char* line) {
   // -------------------------------------------------------------------------
   // DTMF — accumulate digits, check for password match
   // Modem sends:  +RXDTMF: 1   (space between ':' and digit)
+  // Only process DTMF when a call is active — ignore if idle (modem noise)
   // -------------------------------------------------------------------------
-  if (strstr(line, "DTMF:") != NULL) {
+  if (strstr(line, "DTMF:") != NULL && state == ST_IN_CALL) {
     char* lastColon = strrchr(line, ':');
     if (lastColon != NULL) {
       char* digitPtr = lastColon + 1;
@@ -235,12 +292,10 @@ void runStateLogic() {
     hw_sendCmd(F("ATH"));
     hw_waitForOK(5000);
 
-    // 2. Notify — TTS blocks until done
-    hw_notify(F("Timeout. Calling Next."), F("nextuser.amr"));
-
-    // 3. Advance to next person
+    // 2. Advance to next person or reset
     currentCallIndex++;
     if (currentCallIndex < getTotalCalls()) {
+      hw_notify(F("Timeout. Calling Next."), F("nextuser.amr"));
       startDialing();
     } else {
       hw_notify(F("No one answered. System Reset."), F("invalid.amr"));
@@ -307,5 +362,6 @@ void resetSystem() {
   sdListLoaded     = false;
   dynamicCallCount = 0;
   currentCallIndex = 0;
+  stateTimer       = 0;       // prevent stale timeout firing on next call
   Serial.println(F("[SYSTEM]: IDLE - Waiting for Floor/Apt Number"));
 }

@@ -1,5 +1,5 @@
 #include "sdcard.h"
-#include "config.h"
+#include "config.h"   // DTMF_PASSWORD extern declared here
 #include <SPI.h>
 #include <SD.h>
 
@@ -97,6 +97,71 @@ bool sd_loadCallList(const char* filepath, int floorNum) {
   file.close();
   sdListLoaded = (dynamicCallCount > 0);
   return sdListLoaded;
+}
+
+// ---------------------------------------------------------------------------
+// sd_isNumberRegistered — scan entire USERS.TXT for a phone number.
+// Searches every floor, every number in the file.
+// Returns true if found, false if not found or SD error.
+// ---------------------------------------------------------------------------
+bool sd_isNumberRegistered(const char* filepath, const char* number) {
+  if (!SD.exists(filepath)) return false;
+
+  File file = SD.open(filepath);
+  if (!file) return false;
+
+  char lineBuf[96];
+
+  while (file.available()) {
+
+    // Read one line into fixed buffer
+    uint8_t i = 0;
+    while (file.available() && i < (uint8_t)(sizeof(lineBuf) - 1)) {
+      char c = (char)file.read();
+      if (c == '\n') break;
+      if (c != '\r') lineBuf[i++] = c;
+    }
+    lineBuf[i] = '\0';
+
+    // Trim trailing spaces
+    while (i > 0 && lineBuf[i - 1] == ' ') lineBuf[--i] = '\0';
+
+    // Skip empty lines and comment lines
+    if (i == 0 || lineBuf[0] == '#') continue;
+
+    // Find colon — everything after it is numbers
+    char* colonPtr = strchr(lineBuf, ':');
+    if (!colonPtr) continue;
+    char* numbersStart = colonPtr + 1;
+
+    // Strip comment section after ';'
+    char* semiPtr = strchr(numbersStart, ';');
+    if (semiPtr) *semiPtr = '\0';
+
+    // Trim leading spaces
+    while (*numbersStart == ' ') numbersStart++;
+
+    // Tokenise by comma and compare each number
+    char* token = strtok(numbersStart, ",");
+    while (token != NULL) {
+
+      // Trim leading and trailing spaces on token
+      while (*token == ' ') token++;
+      char* end = token + strlen(token) - 1;
+      while (end > token && *end == ' ') *end-- = '\0';
+
+      // Compare with incoming number
+      if (strcmp(token, number) == 0) {
+        file.close();
+        return true;   // found — registered number
+      }
+
+      token = strtok(NULL, ",");
+    }
+  }
+
+  file.close();
+  return false;   // not found in any floor
 }
 
 void sd_loadPassword(const char* filepath) {

@@ -129,13 +129,13 @@ void hw_init() {
   hw_sendCmd(F("AT+CLIP=1"));
   hw_waitForOK(2000);
 
-  //hw_sendCmd(F("AT+DDET=1"));
-  //hw_waitForOK(2000);
-
   hw_sendCmd(F("AT+CNMI=0,0,0,0,0"));
   hw_waitForOK(2000);
 
   hw_sendCmd(F("AT+CSDVC=1"));
+  hw_waitForOK(2000);
+
+  hw_sendCmd(F("AT+CLVL=5"));      // maximum speaker volume (0-5)
   hw_waitForOK(2000);
 }
 
