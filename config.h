@@ -16,6 +16,12 @@
 // Each extra slot costs 16 bytes of RAM
 #define MAX_CALLERS 5
 
+// --- KEYPAD INPUT ---
+// If visitor types more than this many digits without pressing D,
+// the input buffer is cleared automatically
+// Prevents buffer filling with random key presses
+#define MAX_INPUT_DIGITS 3
+
 // --- PASSWORD ---
 // Defined in logic.cpp — declared here so all files can access without re-declaring
 extern String DTMF_PASSWORD;

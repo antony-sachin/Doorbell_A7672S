@@ -260,6 +260,12 @@ void readKeypad() {
       inputString[len + 1] = '\0';
     }
     Serial.print(F("Input Floor/Apt: ")); Serial.println(inputString);
+
+    // Auto-clear if visitor typed more than MAX_INPUT_DIGITS without pressing D
+    if (strlen(inputString) > MAX_INPUT_DIGITS) {
+      Serial.println(F("[SYSTEM]: Input too long — buffer cleared"));
+      inputString[0] = '\0';
+    }
   }
   else if (key == 'D' && state == ST_IDLE) {
     if (strlen(inputString) > 0) {
